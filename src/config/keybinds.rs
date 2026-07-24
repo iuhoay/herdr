@@ -353,6 +353,7 @@ pub struct Keybinds {
     pub split_vertical: ActionKeybinds,
     pub split_horizontal: ActionKeybinds,
     pub close_pane: ActionKeybinds,
+    pub break_pane: ActionKeybinds,
     pub zoom: ActionKeybinds,
     pub resize_mode: ActionKeybinds,
     pub toggle_sidebar: ActionKeybinds,
@@ -515,6 +516,7 @@ impl Config {
             split_vertical: empty_action!(),
             split_horizontal: empty_action!(),
             close_pane: empty_action!(),
+            break_pane: empty_action!(),
             zoom: empty_action!(),
             resize_mode: empty_action!(),
             toggle_sidebar: empty_action!(),
@@ -656,6 +658,7 @@ impl Config {
             apply_action!(keybinds.split_vertical, split_vertical, source);
             apply_action!(keybinds.split_horizontal, split_horizontal, source);
             apply_action!(keybinds.close_pane, close_pane, source);
+            apply_action!(keybinds.break_pane, break_pane, source);
             apply_action!(keybinds.zoom, zoom, source);
             apply_action!(keybinds.resize_mode, resize_mode, source);
             apply_action!(keybinds.toggle_sidebar, toggle_sidebar, source);
@@ -1741,6 +1744,32 @@ close_tab = "X"
             TerminalKey::new(KeyCode::Char('1'), KeyModifiers::SHIFT)
                 .with_shifted_codepoint('!' as u32)
         ));
+    }
+
+    #[test]
+    fn break_pane_is_unbound_by_default() {
+        let config = Config::default();
+        assert!(config.collect_diagnostics().is_empty());
+        assert!(config.keybinds().break_pane.bindings.is_empty());
+    }
+
+    #[test]
+    fn configured_break_pane_binds_from_config_without_conflicts() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+break_pane = "prefix+shift+c"
+"#,
+        )
+        .unwrap();
+
+        let diagnostics = config.collect_diagnostics();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+        let kb = config.keybinds();
+        assert!(kb
+            .break_pane
+            .matches_prefix_key(TerminalKey::new(KeyCode::Char('c'), KeyModifiers::SHIFT)));
     }
 
     #[test]

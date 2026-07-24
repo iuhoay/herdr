@@ -366,6 +366,10 @@ impl App {
                     leave_navigate_mode(&mut self.state);
                 }
             }
+            NavigateAction::BreakPane => {
+                self.break_focused_pane_to_new_tab_via_api();
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::EditScrollback => {}
             NavigateAction::CopyMode => self.state.enter_copy_mode(&self.terminal_runtimes),
             NavigateAction::Zoom => {
@@ -566,6 +570,39 @@ impl App {
         };
         self.runtime_pane_close("tui.pane.close", pane_id);
         self.state.mode == Mode::ConfirmClose
+    }
+
+    pub(crate) fn break_focused_pane_to_new_tab_via_api(&mut self) {
+        let Some((ws_idx, pane_id)) = self.focused_pane_target() else {
+            return;
+        };
+        // Breaking the only pane in its tab would just relocate that tab into a
+        // fresh one with no meaningful change, so treat it as a no-op (mirrors
+        // tmux refusing to break a sole pane).
+        let pane_count = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.active_tab())
+            .map(|tab| tab.layout.pane_count())
+            .unwrap_or(0);
+        if pane_count <= 1 {
+            return;
+        }
+        let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) else {
+            return;
+        };
+        self.runtime_pane_move(
+            "tui.pane.break",
+            crate::api::schema::PaneMoveParams {
+                pane_id,
+                destination: crate::api::schema::PaneMoveDestination::NewTab {
+                    workspace_id: None,
+                    label: None,
+                },
+                focus: true,
+            },
+        );
     }
 
     pub(crate) fn zoom_focused_pane_via_api(&mut self) {
@@ -1315,6 +1352,7 @@ pub(crate) enum NavigateAction {
     SplitVertical,
     SplitHorizontal,
     ClosePane,
+    BreakPane,
     EditScrollback,
     CopyMode,
     Zoom,
@@ -1453,6 +1491,7 @@ fn non_indexed_action_for_key(
         (&kb.split_vertical, NavigateAction::SplitVertical),
         (&kb.split_horizontal, NavigateAction::SplitHorizontal),
         (&kb.close_pane, NavigateAction::ClosePane),
+        (&kb.break_pane, NavigateAction::BreakPane),
         (&kb.zoom, NavigateAction::Zoom),
         (&kb.resize_mode, NavigateAction::EnterResizeMode),
         (&kb.toggle_sidebar, NavigateAction::ToggleSidebar),
@@ -1678,6 +1717,12 @@ pub(super) fn execute_navigate_action_in_context(
             if !state.close_pane() {
                 leave_navigate_mode(state);
             }
+        }
+        NavigateAction::BreakPane => {
+            if let Some(ws) = state.active.and_then(|i| state.workspaces.get_mut(i)) {
+                ws.break_focused_pane_to_new_tab();
+            }
+            leave_navigate_mode(state);
         }
         NavigateAction::EditScrollback => {}
         NavigateAction::CopyMode => state.enter_copy_mode(terminal_runtimes),
@@ -2509,6 +2554,21 @@ navigate_pane_right = "ctrl+l"
     }
 
     #[test]
+    fn configured_break_pane_key_maps_to_break_pane_navigation_action() {
+        let mut state = state_with_workspaces(&["test"]);
+        // break_pane is unbound by default; bind it to exercise the dispatch.
+        state.keybinds.break_pane = crate::config::ActionKeybinds::prefix("shift+c");
+
+        let action = action_for_key(
+            &state,
+            TerminalKey::new(KeyCode::Char('c'), KeyModifiers::SHIFT),
+            BindingDispatch::Prefix,
+        );
+
+        assert_eq!(action, Some(NavigateAction::BreakPane));
+    }
+
+    #[test]
     fn terminal_direct_last_pane_shortcut_maps_to_navigation_action() {
         let mut state = state_with_workspaces(&["test"]);
         state.keybinds.last_pane = crate::config::ActionKeybinds::direct("alt+l");
@@ -3032,6 +3092,53 @@ navigate_pane_down = "ctrl+j"
         assert_eq!(app.state.selected, 0);
         assert_eq!(app.state.mode, Mode::ConfirmClose);
         assert_eq!(app.state.workspaces.len(), 2);
+    }
+
+    #[test]
+    fn tui_break_pane_moves_focused_pane_to_new_tab_via_api() {
+        let mut app = app_with_test_workspaces(&["main"]);
+        // Give the active tab two panes, then break the focused one out.
+        let moved = app.state.workspaces[0].test_split(Direction::Horizontal);
+        app.state.workspaces[0].layout.focus_pane(moved);
+        app.state.ensure_test_terminals();
+        app.state.mode = Mode::Navigate;
+
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 2);
+
+        app.execute_tui_navigate_action(NavigateAction::BreakPane, ActionContext::Navigate);
+
+        // The source tab keeps one pane; the moved pane now lives in a new tab.
+        assert_eq!(app.state.workspaces[0].tabs.len(), 2);
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 1);
+        assert_eq!(app.state.workspaces[0].tabs[1].layout.pane_count(), 1);
+        assert!(app.state.workspaces[0].tabs[1]
+            .layout
+            .pane_ids()
+            .contains(&moved));
+    }
+
+    #[test]
+    fn tui_break_pane_is_noop_when_pane_is_alone_in_tab() {
+        let mut app = app_with_test_workspaces(&["main"]);
+        app.state.ensure_test_terminals();
+        app.state.mode = Mode::Navigate;
+
+        // A single pane in its tab: there is nothing meaningful to break out.
+        let tab_number_before = app.state.workspaces[0].active_tab().unwrap().number;
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 1);
+
+        app.execute_tui_navigate_action(NavigateAction::BreakPane, ActionContext::Navigate);
+
+        // No new tab is created and the original tab is left untouched (a churn
+        // would replace it with a freshly numbered tab).
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 1);
+        assert_eq!(
+            app.state.workspaces[0].active_tab().unwrap().number,
+            tab_number_before
+        );
     }
 
     #[cfg(unix)]
