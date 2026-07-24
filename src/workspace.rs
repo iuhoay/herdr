@@ -1005,7 +1005,8 @@ impl Workspace {
     /// through the runtime API (`runtime_pane_move` with a `NewTab`
     /// destination): relocate the focused pane into a fresh tab and focus it.
     /// A pane that is alone in its tab is left in place, since breaking it out
-    /// would only churn the tab list without a meaningful change.
+    /// would only churn the tab list without a meaningful change. A zoomed
+    /// source tab is unzoomed first, matching the TUI gesture.
     #[cfg(test)]
     pub(crate) fn break_focused_pane_to_new_tab(&mut self) -> Option<usize> {
         let pane_id = self.focused_pane_id()?;
@@ -1024,6 +1025,9 @@ impl Workspace {
                 tab.render_dirty.clone(),
             )
         })?;
+        if let Some(tab) = self.active_tab_mut() {
+            tab.zoomed = false;
+        }
         let taken = self.take_pane_for_move(pane_id)?;
         let tab_idx = self.create_tab_from_existing_pane(
             taken.moved,

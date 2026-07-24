@@ -579,19 +579,32 @@ impl App {
         // Breaking the only pane in its tab would just relocate that tab into a
         // fresh one with no meaningful change, so treat it as a no-op (mirrors
         // tmux refusing to break a sole pane).
-        let pane_count = self
+        let Some((pane_count, zoomed)) = self
             .state
             .workspaces
             .get(ws_idx)
             .and_then(|ws| ws.active_tab())
-            .map(|tab| tab.layout.pane_count())
-            .unwrap_or(0);
+            .map(|tab| (tab.layout.pane_count(), tab.zoomed))
+        else {
+            return;
+        };
         if pane_count <= 1 {
             return;
         }
         let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) else {
             return;
         };
+        // pane.move intentionally rejects zoomed source tabs. For this gesture,
+        // unzoom first so the requested break still happens.
+        if zoomed {
+            self.runtime_pane_zoom(
+                "tui.pane.break.unzoom",
+                crate::api::schema::PaneZoomParams {
+                    pane_id: Some(pane_id.clone()),
+                    mode: crate::api::schema::PaneZoomMode::Off,
+                },
+            );
+        }
         self.runtime_pane_move(
             "tui.pane.break",
             crate::api::schema::PaneMoveParams {
@@ -3112,6 +3125,25 @@ navigate_pane_down = "ctrl+j"
         assert_eq!(app.state.workspaces[0].tabs.len(), 2);
         assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 1);
         assert_eq!(app.state.workspaces[0].tabs[1].layout.pane_count(), 1);
+        assert!(app.state.workspaces[0].tabs[1]
+            .layout
+            .pane_ids()
+            .contains(&moved));
+    }
+
+    #[test]
+    fn tui_break_pane_unzooms_before_moving_to_new_tab() {
+        let mut app = app_with_test_workspaces(&["main"]);
+        let moved = app.state.workspaces[0].test_split(Direction::Horizontal);
+        app.state.workspaces[0].layout.focus_pane(moved);
+        app.state.workspaces[0].tabs[0].zoomed = true;
+        app.state.ensure_test_terminals();
+        app.state.mode = Mode::Navigate;
+
+        app.execute_tui_navigate_action(NavigateAction::BreakPane, ActionContext::Navigate);
+
+        assert_eq!(app.state.workspaces[0].tabs.len(), 2);
+        assert!(app.state.workspaces[0].tabs.iter().all(|tab| !tab.zoomed));
         assert!(app.state.workspaces[0].tabs[1]
             .layout
             .pane_ids()
